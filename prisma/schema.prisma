@@ -1,0 +1,230 @@
+// MyLegalPrompt — production database schema
+// Provider: PostgreSQL. Run `npm run db:migrate` to apply.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ──────────────────────────────────────────────
+// Auth & Users
+// ──────────────────────────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Plan {
+  FREE
+  PRO
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  // Null for OAuth-only accounts.
+  passwordHash  String?
+  role          Role      @default(USER)
+  plan          Plan      @default(FREE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts      Account[]
+  sessions      Session[]
+  documents     Document[]
+  subscription  Subscription?
+  usageRecords  UsageRecord[]
+  auditLogs     AuditLog[]
+
+  @@index([email])
+}
+
+// NextAuth: OAuth provider accounts
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ──────────────────────────────────────────────
+// Documents & Analyses
+// ──────────────────────────────────────────────
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  ANALYZED
+  FAILED
+}
+
+enum FileType {
+  PDF
+  DOCX
+  TXT
+}
+
+model Document {
+  id           String         @id @default(cuid())
+  userId       String
+  filename     String
+  fileType     FileType
+  fileSize     Int // bytes
+  pageCount    Int            @default(0)
+  // Storage key/path of the original file (local path or object-store key).
+  storageKey   String
+  // Extracted plain text (kept for re-analysis & side-by-side view).
+  extractedText String?       @db.Text
+  status       DocumentStatus @default(UPLOADED)
+  errorMessage String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  analysis Analysis?
+
+  @@index([userId])
+  @@index([userId, createdAt])
+}
+
+enum RiskLevel {
+  LOW
+  MODERATE
+  HIGH
+}
+
+// One analysis per document (latest result). Structured fields are stored as
+// JSON to stay flexible as the analysis schema evolves, while the most-queried
+// values (risk) are promoted to columns for filtering/sorting.
+model Analysis {
+  id         String    @id @default(cuid())
+  documentId String    @unique
+
+  riskScore  Int       @default(0) // 0-100
+  riskLevel  RiskLevel @default(LOW)
+
+  executiveSummary String?     @db.Text
+  // Full structured result: summary, plain-english, clauses, obligations,
+  // dates, risks, red flags, recommended questions, side-by-side segments.
+  result     Json
+  modelUsed  String?
+  tokensUsed Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([riskLevel])
+}
+
+// ──────────────────────────────────────────────
+// Billing & Usage
+// ──────────────────────────────────────────────
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+  UNPAID
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  plan                 Plan               @default(FREE)
+  status               SubscriptionStatus @default(ACTIVE)
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([stripeCustomerId])
+}
+
+// Tracks consumption per billing period for plan-limit enforcement.
+// `periodKey` is e.g. "2026-06" so we can count analyses per calendar month.
+model UsageRecord {
+  id         String   @id @default(cuid())
+  userId     String
+  periodKey  String
+  analyses   Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, periodKey])
+  @@index([userId])
+}
+
+// ──────────────────────────────────────────────
+// Audit Logs (security/compliance)
+// ──────────────────────────────────────────────
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String // e.g. AUTH_LOGIN, DOCUMENT_UPLOAD, ANALYSIS_RUN, BILLING_UPGRADE
+  metadata  Json?
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
